@@ -13,6 +13,7 @@ APP_NAME = "SuperRegistrationMachine"
 DEFAULT_WINDOW_SECONDS = 10.0  # default: from 6:59:50 to 7:00:00
 RESET_DELAY = 3.0  # auto-restart delay after clicking
 TARGET_TIME = datetime(2000, 1, 1, 7, 0, 0)  # purely display, not real clock
+RESULT_DIGITS = 5
 
 
 def get_base_time(window_seconds: float) -> datetime:
@@ -21,19 +22,27 @@ def get_base_time(window_seconds: float) -> datetime:
 
 def format_clock(elapsed: float, show_millis: bool, window_seconds: float) -> str:
     base = get_base_time(window_seconds) + timedelta(seconds=max(0.0, elapsed))
-    if show_millis:
-        return base.strftime("%I:%M:%S.%f %p").lstrip("0")[:-3]
-    return base.strftime("%I:%M:%S %p").lstrip("0")
+    # allow flexible fractional precision
+    digits = st.session_state.get("precision_digits", 3 if show_millis else 2)
+    digits = max(0, min(5, int(digits)))
+    if digits == 0:
+        return base.strftime("%I:%M:%S %p").lstrip("0")
+    raw = base.strftime("%I:%M:%S.%f %p").lstrip("0")
+    time_part, meridiem = raw.split(" ")
+    trimmed = time_part[:- (6 - digits)]  # drop extra microsecond digits
+    return f"{trimmed} {meridiem}"
 
 
-def format_remaining(seconds: float, show_millis: bool) -> str:
+def format_remaining(seconds: float, show_millis: bool, *, digits_override: Optional[int] = None) -> str:
     total = max(0.0, seconds)
     h = int(total // 3600)
     m = int((total % 3600) // 60)
     s = total % 60
-    if show_millis:
-        return f"{h:02d}:{m:02d}:{s:06.3f}"
-    return f"{h:02d}:{m:02d}:{s:05.2f}"
+    base_digits = st.session_state.get("precision_digits", 3 if show_millis else 2)
+    digits = digits_override if digits_override is not None else base_digits
+    digits = max(0, min(5, int(digits)))
+    frac_fmt = f"{s:0{3 + digits}.{digits}f}" if digits else f"{int(s):02d}"
+    return f"{h:02d}:{m:02d}:{frac_fmt}"
 
 
 def init_state() -> None:
@@ -45,6 +54,7 @@ def init_state() -> None:
         st.session_state.reaction_times_standard: List[float] = []
         st.session_state.next_reset_at: Optional[float] = None
         st.session_state.window_seconds = DEFAULT_WINDOW_SECONDS
+        st.session_state.precision_digits = 3
 
 
 def reset_attempt() -> None:
@@ -61,12 +71,13 @@ def elapsed_seconds() -> float:
 def register_click() -> None:
     elapsed = elapsed_seconds()
     window_seconds = float(st.session_state.get("window_seconds", DEFAULT_WINDOW_SECONDS))
-    show_ms = st.session_state.get("show_ms", False)
+    precision_digits = int(st.session_state.get("precision_digits", 3))
+    show_ms = precision_digits >= 3
     if elapsed < window_seconds:
         remaining = window_seconds - elapsed
         st.session_state.last_status = "warning"
         st.session_state.last_result = (
-            f"Too early! {format_remaining(remaining, show_ms)} "
+            f"Too early! {format_remaining(remaining, show_ms, digits_override=RESULT_DIGITS)} "
             "remain before 7:00:00."
         )
     else:
@@ -77,14 +88,25 @@ def register_click() -> None:
             st.session_state.reaction_times_standard.append(reaction)
         st.session_state.last_status = "success"
         st.session_state.last_result = (
-            f"Registered {reaction:.3f}s after 7:00:00. Nice reflexes!"
+            f"Registered {reaction:.5f}s after 7:00:00. Nice reflexes!"
         )
     st.session_state.next_reset_at = time.time() + RESET_DELAY
 
 
 def maybe_auto_reset() -> None:
-    if st.session_state.next_reset_at and time.time() >= st.session_state.next_reset_at:
-        reset_attempt()
+    if st.session_state.next_reset_at:
+        remaining = st.session_state.next_reset_at - time.time()
+        if remaining <= 0:
+            reset_attempt()
+            st.experimental_rerun()
+        else:
+            # poll the timer by asking the client to request a rerun
+            interval_ms = max(300, int(min(remaining, 1.0) * 1000))
+            components.html(
+                f"<script>setTimeout(() => window.parent.postMessage({{isStreamlitMessage:true, type:'streamlit:requestRerun'}}, '*'), {interval_ms});</script>",
+                height=0,
+                width=0,
+            )
 
 
 def cool_styles() -> None:
@@ -131,7 +153,14 @@ def cool_styles() -> None:
 
 
 def countdown_card() -> None:
-    show_ms = st.toggle("Show milliseconds", value=False, key="show_ms")
+    precision = st.select_slider(
+        "Timer precision (decimal places)",
+        options=[1, 2, 3, 4, 5],
+        value=int(st.session_state.get("precision_digits", 3)),
+        key="precision_digits",
+        help="Choose how many decimal digits the timer displays.",
+    )
+    show_ms = precision >= 3
     default_window = float(st.session_state.get("window_seconds", DEFAULT_WINDOW_SECONDS))
     window_seconds = st.slider(
         "Seconds before 7:00:00 to start",
@@ -193,19 +222,20 @@ def countdown_card() -> None:
             const statusEl = document.getElementById('countdown-status');
             const targetMs = Date.UTC(2000, 0, 1, 7, 0, 0, 0);
             const baseMs = targetMs - windowMs;
-            const showMs = {"true" if show_ms else "false"};
+            const precisionDigits = {precision};
 
             function format(remainingMs) {{
                 const dt = new Date(baseMs + Math.max(0, remainingMs));
                 const pad = (n) => n.toString().padStart(2, "0");
                 const hours = pad(dt.getUTCHours());
                 const minutes = pad(dt.getUTCMinutes());
-                const seconds = pad(dt.getUTCSeconds());
-                if (showMs) {{
+                const secondsWhole = pad(dt.getUTCSeconds());
+                if (precisionDigits > 0) {{
                     const millis = dt.getUTCMilliseconds().toString().padStart(3, "0");
-                    return `${{hours}}:${{minutes}}:${{seconds}}.${{millis}}`;
+                    const padded = (millis + "0000").slice(0, precisionDigits);
+                    return `${{hours}}:${{minutes}}:${{secondsWhole}}.${{padded}}`;
                 }}
-                return `${{hours}}:${{minutes}}:${{seconds}}`;
+                return `${{hours}}:${{minutes}}:${{secondsWhole}}`;
             }}
 
             function tick() {{
@@ -252,14 +282,25 @@ def countdown_card() -> None:
 
     st.caption(
         f"Window: {base_time.strftime('%I:%M:%S').lstrip('0')} → 7:00:00 • "
-        f"Mode: {'milliseconds' if show_ms else 'hundredths'}"
+        f"Precision: {precision} decimal place{'s' if precision != 1 else ''}"
     )
 
 
 def stats_tab() -> None:
     st.subheader("Performance pulse")
+    if st.button("Reset statistics", type="secondary"):
+        st.session_state.reaction_times_ms = []
+        st.session_state.reaction_times_standard = []
+        st.experimental_rerun()
+
     ms_times = st.session_state.reaction_times_ms
     standard_times = st.session_state.reaction_times_standard
+    max_time = 0.0
+    if ms_times:
+        max_time = max(max_time, max(ms_times))
+    if standard_times:
+        max_time = max(max_time, max(standard_times))
+    y_domain = [0, max_time * 1.05] if max_time > 0 else None
 
     col_ms, col_standard = st.columns(2)
 
@@ -299,7 +340,11 @@ def stats_tab() -> None:
                 .mark_line(point=True)
                 .encode(
                     x=alt.X("attempt:Q", title="Attempt #"),
-                    y=alt.Y("reaction_s:Q", title="Reaction time (s)"),
+                    y=alt.Y(
+                        "reaction_s:Q",
+                        title="Reaction time (s)",
+                        scale=alt.Scale(domain=y_domain) if y_domain else alt.Undefined,
+                    ),
                     tooltip=["attempt", "reaction_s:Q"],
                 )
                 .properties(height=180)
