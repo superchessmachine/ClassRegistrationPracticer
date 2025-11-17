@@ -9,13 +9,18 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-WINDOW_SECONDS = 10.0  # from 6:59:50 to 7:00:00
-RESET_DELAY = 2.0
-BASE_TIME = datetime(2000, 1, 1, 6, 59, 50)  # purely display, not real clock
+APP_NAME = "SuperRegistrationMachine"
+DEFAULT_WINDOW_SECONDS = 10.0  # default: from 6:59:50 to 7:00:00
+RESET_DELAY = 3.0  # auto-restart delay after clicking
+TARGET_TIME = datetime(2000, 1, 1, 7, 0, 0)  # purely display, not real clock
 
 
-def format_clock(elapsed: float, show_millis: bool) -> str:
-    base = BASE_TIME + timedelta(seconds=max(0.0, elapsed))
+def get_base_time(window_seconds: float) -> datetime:
+    return TARGET_TIME - timedelta(seconds=window_seconds)
+
+
+def format_clock(elapsed: float, show_millis: bool, window_seconds: float) -> str:
+    base = get_base_time(window_seconds) + timedelta(seconds=max(0.0, elapsed))
     if show_millis:
         return base.strftime("%I:%M:%S.%f %p").lstrip("0")[:-3]
     return base.strftime("%I:%M:%S %p").lstrip("0")
@@ -36,8 +41,10 @@ def init_state() -> None:
         st.session_state.round_started_at = time.time()
         st.session_state.last_result: Optional[str] = None
         st.session_state.last_status: Optional[str] = None
-        st.session_state.reaction_times: List[float] = []
+        st.session_state.reaction_times_ms: List[float] = []
+        st.session_state.reaction_times_standard: List[float] = []
         st.session_state.next_reset_at: Optional[float] = None
+        st.session_state.window_seconds = DEFAULT_WINDOW_SECONDS
 
 
 def reset_attempt() -> None:
@@ -53,16 +60,21 @@ def elapsed_seconds() -> float:
 
 def register_click() -> None:
     elapsed = elapsed_seconds()
-    if elapsed < WINDOW_SECONDS:
-        remaining = WINDOW_SECONDS - elapsed
+    window_seconds = float(st.session_state.get("window_seconds", DEFAULT_WINDOW_SECONDS))
+    show_ms = st.session_state.get("show_ms", False)
+    if elapsed < window_seconds:
+        remaining = window_seconds - elapsed
         st.session_state.last_status = "warning"
         st.session_state.last_result = (
-            f"Too early! {format_remaining(remaining, st.session_state.get('show_ms', False))} "
+            f"Too early! {format_remaining(remaining, show_ms)} "
             "remain before 7:00:00."
         )
     else:
-        reaction = elapsed - WINDOW_SECONDS
-        st.session_state.reaction_times.append(reaction)
+        reaction = elapsed - window_seconds
+        if show_ms:
+            st.session_state.reaction_times_ms.append(reaction)
+        else:
+            st.session_state.reaction_times_standard.append(reaction)
         st.session_state.last_status = "success"
         st.session_state.last_result = (
             f"Registered {reaction:.3f}s after 7:00:00. Nice reflexes!"
@@ -120,10 +132,22 @@ def cool_styles() -> None:
 
 def countdown_card() -> None:
     show_ms = st.toggle("Show milliseconds", value=False, key="show_ms")
+    default_window = float(st.session_state.get("window_seconds", DEFAULT_WINDOW_SECONDS))
+    window_seconds = st.slider(
+        "Seconds before 7:00:00 to start",
+        min_value=2.0,
+        max_value=30.0,
+        value=default_window,
+        step=0.5,
+        key="window_seconds",
+        on_change=reset_attempt,
+        help="Adjust how far before 7:00:00 the countdown begins.",
+    )
+    base_time = get_base_time(window_seconds)
     elapsed = elapsed_seconds()
-    remaining = WINDOW_SECONDS - elapsed
+    remaining = window_seconds - elapsed
     ready = remaining <= 0.0
-    display_time = format_clock(elapsed, show_ms)
+    display_time = format_clock(elapsed, show_ms, window_seconds)
 
     components.html(
         f"""
@@ -164,10 +188,11 @@ def countdown_card() -> None:
         <script>
         (function() {{
             const startTs = {int(st.session_state.round_started_at * 1000)};
-            const windowMs = {int(WINDOW_SECONDS * 1000)};
+            const windowMs = {int(window_seconds * 1000)};
             const clockEl = document.getElementById('countdown-clock');
             const statusEl = document.getElementById('countdown-status');
-            const baseMs = Date.UTC(2000, 0, 1, 6, 59, 50, 0);
+            const targetMs = Date.UTC(2000, 0, 1, 7, 0, 0, 0);
+            const baseMs = targetMs - windowMs;
             const showMs = {"true" if show_ms else "false"};
 
             function format(remainingMs) {{
@@ -223,75 +248,80 @@ def countdown_card() -> None:
             st.warning(st.session_state.last_result)
         else:
             st.success(st.session_state.last_result)
-        st.caption("Resetting for the next attempt…")
+        st.caption("Resetting for the next attempt in about 3 seconds…")
 
     st.caption(
-        f"Window: 6:59:50 → 7:00:00 • "
+        f"Window: {base_time.strftime('%I:%M:%S').lstrip('0')} → 7:00:00 • "
         f"Mode: {'milliseconds' if show_ms else 'hundredths'}"
     )
 
 
 def stats_tab() -> None:
     st.subheader("Performance pulse")
-    times = st.session_state.reaction_times
-    if not times:
-        st.info("No reaction times yet. Nail a registration to start building your chart.")
-        return
+    ms_times = st.session_state.reaction_times_ms
+    standard_times = st.session_state.reaction_times_standard
 
-    data = pd.DataFrame({"reaction_s": times})
-    metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
-    metrics_col1.metric("Attempts", len(times))
-    metrics_col2.metric("Mean (s)", f"{np.mean(times):.3f}")
-    metrics_col3.metric("Best (s)", f"{np.min(times):.3f}")
-    metrics_col4.metric("90th %ile (s)", f"{np.percentile(times, 90):.3f}")
+    col_ms, col_standard = st.columns(2)
 
-    st.markdown("#### Distribution")
-    hist = (
-        alt.Chart(data)
-        .mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
-        .encode(
-            alt.X("reaction_s:Q", bin=alt.Bin(maxbins=12), title="Reaction time (s)"),
-            alt.Y("count()", title="Attempts"),
-            tooltip=[alt.Tooltip("count()", title="Attempts"), "reaction_s:Q"],
-        )
-        .properties(height=240)
-    )
-    mean_line = (
-        alt.Chart(pd.DataFrame({"mean": [np.mean(times)]}))
-        .mark_rule(color="#38bdf8", strokeDash=[6, 4])
-        .encode(x="mean:Q")
-    )
-    st.altair_chart(hist + mean_line, use_container_width=True)
+    def render_stats_block(col, title: str, times: List[float]) -> None:
+        with col:
+            st.markdown(f"#### {title}")
+            if not times:
+                st.info("No reaction times yet in this mode.")
+                return
 
-    st.markdown("#### Recent streak")
-    streak = data.reset_index().rename(columns={"index": "attempt"})
-    line = (
-        alt.Chart(streak)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X("attempt:Q", title="Attempt #"),
-            y=alt.Y("reaction_s:Q", title="Reaction time (s)"),
-            tooltip=["attempt", "reaction_s:Q"],
-        )
-        .properties(height=240)
-    )
-    st.altair_chart(line, use_container_width=True)
+            data = pd.DataFrame({"reaction_s": times})
+            metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
+            metrics_col1.metric("Attempts", len(times))
+            metrics_col2.metric("Mean (s)", f"{np.mean(times):.3f}")
+            metrics_col3.metric("Best (s)", f"{np.min(times):.3f}")
 
-    st.caption(
-        "Lower is better. Aim to click just after the clock hits 7:00:00 to shave down your average."
-    )
+            hist = (
+                alt.Chart(data)
+                .mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
+                .encode(
+                    alt.X("reaction_s:Q", bin=alt.Bin(maxbins=12), title="Reaction time (s)"),
+                    alt.Y("count()", title="Attempts"),
+                    tooltip=[alt.Tooltip("count()", title="Attempts"), "reaction_s:Q"],
+                )
+                .properties(height=200)
+            )
+            mean_line = (
+                alt.Chart(pd.DataFrame({"mean": [np.mean(times)]}))
+                .mark_rule(color="#38bdf8", strokeDash=[6, 4])
+                .encode(x="mean:Q")
+            )
+            st.altair_chart(hist + mean_line, use_container_width=True)
+
+            streak = data.reset_index().rename(columns={"index": "attempt"})
+            line = (
+                alt.Chart(streak)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("attempt:Q", title="Attempt #"),
+                    y=alt.Y("reaction_s:Q", title="Reaction time (s)"),
+                    tooltip=["attempt", "reaction_s:Q"],
+                )
+                .properties(height=180)
+            )
+            st.altair_chart(line, use_container_width=True)
+
+    render_stats_block(col_ms, "Milliseconds mode", ms_times)
+    render_stats_block(col_standard, "Hundredths mode", standard_times)
+
+    st.caption("Lower is better. Nail runs in each mode to see separate stats side-by-side.")
 
 
 def main() -> None:
-    st.set_page_config(page_title="Class Registration Reflex Trainer", page_icon="⏱️")
+    st.set_page_config(page_title=APP_NAME, page_icon="⏱️")
     cool_styles()
     init_state()
     maybe_auto_reset()
 
-    st.title("Class Registration Reflex Trainer")
+    st.title(APP_NAME)
     st.write(
-        "Practice the last 10 seconds before **7:00:00 AM**. The timer loops from "
-        "6:59:50 to 7:00:00 so you can drill your reaction."
+        "Practice the final stretch before **7:00:00 AM**. Adjust how early the clock starts "
+        "so you can squeeze in more runs or take your time."
     )
 
     countdown_tab, stats_view = st.tabs(["⏱️ Countdown", "📊 Stats"])
