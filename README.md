@@ -1,3 +1,11 @@
+# Autoregister helper (use at your own risk)
+If you really want to automate a registration click, copy the code from `autoregister.js` and run it in your browser console on the enrollment page—use it at your own risk.
+1. Navigate to the registration page and make sure the button you normally click is visible.
+2. Open the browser console (Cmd+Option+J on macOS, Ctrl+Shift+J on Windows).
+3. Paste the entire `autoregister.js` snippet and press Enter.
+4. Enter the exact 24h target time (`HH:MM:SS.mmm`) and any extra delay when prompted; the script schedules a click on `ctl00_contentPlaceHolder_ibEnroll`.
+5. Leave the tab focused; the script logs its countdown and clicks when the time + delay expires.
+
 # SuperRegistrationMachine
 
 A cross-platform Streamlit app to drill your timing for course registration. Practice the last seconds before 7:00:00 AM, capture reaction times separately for millisecond and standard views, and keep looping automatically.
